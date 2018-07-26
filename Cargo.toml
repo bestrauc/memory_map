@@ -4,3 +4,4 @@ version = "0.1.0"
 authors = ["Benjamin Strauch <b.strauch@fu-berlin.de>"]
 
 [dependencies]
+bitflags = "1.0.3"
