@@ -5,3 +5,4 @@ authors = ["Benjamin Strauch <b.strauch@fu-berlin.de>"]
 
 [dependencies]
 bitflags = "1.0.3"
+byteorder = "1.2.3"

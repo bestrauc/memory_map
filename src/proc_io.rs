@@ -1,14 +1,37 @@
 use std::fs::{read_dir, DirEntry, File};
+use std::path::PathBuf;
 use std::io::prelude::*;
+use std::io::SeekFrom;
+use std::io;
 
 use proc_structures::*;
+
+pub fn virtual_to_physical(pid: usize, virtual_address: usize) {
+    // the virtual address lies in a certain physical page
+    // and each page index in `pagemap` is a 64bit number
+    let page_number = virtual_address / LINUX_PAGE_SIZE;
+    let byte_offset = page_number * 8;
+
+    let pagemap_filepath = format!("/proc/{}/pagemap", pid);
+    let mut pagemap_file = File::open(pagemap_filepath)
+        .expect("Could not open pagemap file.");
+
+    pagemap_file.seek(SeekFrom::Start(byte_offset as u64))
+        .expect("Could not seek in pagemap file.");
+
+    // read the 64bit value
+    let mut buf = [0u8; 8];
+    pagemap_file.read(&mut buf).expect("Could not read from pagemap file.");
+
+    println!("{:?}", buf);
+}
 
 /// Parse process metadata from the `/proc/[pid]/stat` file
 ///
 /// Precondition: dir_entry must be a valid process information directory.
-fn get_process_metadata(dir_entry: DirEntry) -> ProcessInformation {
+fn get_process_metadata(dir_path: PathBuf) -> ProcessInformation {
     // parse the /proc/pid/stat file
-    let stat_path = dir_entry.path().join("stat");
+    let stat_path = dir_path.join("stat");
     let stat_string = stat_path.to_str().unwrap().to_string();
     let mut stat_file = File::open(stat_path)
         .expect(&format!("Error: there should be a file '{}'", stat_string));
@@ -40,6 +63,20 @@ fn get_process_metadata(dir_entry: DirEntry) -> ProcessInformation {
     ProcessInformation::new_from_stat(&stat_fields)
 }
 
+pub fn get_pid_info(pid: u64) -> io::Result<ProcessInformation> {
+    // check if the directory exists and we can access it
+    let process_path = PathBuf::from(format!("/proc/{}", pid));
+    let file_result = File::open(process_path.join("maps"));
+    if let Err(err) = file_result {
+        eprintln!("Could not access {:?}", process_path);
+        eprintln!("{}", err.to_string());
+        return Err(err);
+    }
+
+    let process_info = get_process_metadata(PathBuf::from(process_path));
+    Ok(process_info)
+}
+
 /// Get information about the running processes from `/proc`
 pub fn get_process_info() -> Vec<ProcessInformation> {
     let mut process_list = Vec::new();
@@ -67,9 +104,15 @@ pub fn get_process_info() -> Vec<ProcessInformation> {
     println!("Found {} processes", proc_dirs.len());
 
     for dir_entry in proc_dirs {
-        let process_info = get_process_metadata(dir_entry);
+        let process_info = get_process_metadata(dir_entry.path());
         process_list.push(process_info);
     }
+
+    let pagemap_available = process_list.iter()
+        .filter(|process| process.has_physical_map())
+        .count();
+
+    println!("Could access pagemap info for {} processes", pagemap_available);
 
     process_list
 }
