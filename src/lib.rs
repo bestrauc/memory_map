@@ -2,5 +2,4 @@
 extern crate bitflags;
 extern crate byteorder;
 
-pub mod proc_io;
-pub mod proc_structures;
+pub mod proc_utils;

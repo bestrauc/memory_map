@@ -1,30 +1,9 @@
-use std::fs::{read_dir, DirEntry, File};
+use std::fs::{read_dir, File};
 use std::path::PathBuf;
 use std::io::prelude::*;
-use std::io::SeekFrom;
 use std::io;
 
-use proc_structures::*;
-
-pub fn virtual_to_physical(pid: usize, virtual_address: usize) {
-    // the virtual address lies in a certain physical page
-    // and each page index in `pagemap` is a 64bit number
-    let page_number = virtual_address / LINUX_PAGE_SIZE;
-    let byte_offset = page_number * 8;
-
-    let pagemap_filepath = format!("/proc/{}/pagemap", pid);
-    let mut pagemap_file = File::open(pagemap_filepath)
-        .expect("Could not open pagemap file.");
-
-    pagemap_file.seek(SeekFrom::Start(byte_offset as u64))
-        .expect("Could not seek in pagemap file.");
-
-    // read the 64bit value
-    let mut buf = [0u8; 8];
-    pagemap_file.read(&mut buf).expect("Could not read from pagemap file.");
-
-    println!("{:?}", buf);
-}
+use super::process::ProcessInformation;
 
 /// Parse process metadata from the `/proc/[pid]/stat` file
 ///
