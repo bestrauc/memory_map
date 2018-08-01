@@ -33,14 +33,12 @@ impl MemoryPermissions {
     }
 }
 
-#[derive(Debug)]
-pub struct MemoryRange(usize, usize);
-
 /// Describes a memory region as contained in `/proc/[pid]/maps`
 #[derive(Debug)]
 pub struct MemoryRegion {
     // virtual memory region
-    virtual_pages: MemoryRange,
+    v_region_start: usize,
+    v_region_end: usize,
     permissions: MemoryPermissions,
 
     // mapped file location and offset in the file
@@ -48,7 +46,7 @@ pub struct MemoryRegion {
     pathname: Option<String>,
 
     // the corresponding physical regions that make up the virtual range
-    physical_regions: Option<HashMap<usize, MemoryRange>>,
+    physical_regions: Option<HashMap<usize, (usize, usize)>>,
 }
 
 impl MemoryRegion {
@@ -57,15 +55,15 @@ impl MemoryRegion {
             println!("Finding physical maps for {}", self.pathname.as_ref().unwrap());
         }
 
-        let mut physical_map: HashMap<usize, MemoryRange> = HashMap::new();
+        let mut physical_map: HashMap<usize, (usize, usize)> = HashMap::new();
 
         // start and end page numbers
-        let page_start = self.virtual_pages.0 / LINUX_PAGE_SIZE;
-        let page_end = self.virtual_pages.1 / LINUX_PAGE_SIZE;
+        let page_index_start = self.v_region_start / LINUX_PAGE_SIZE;
+        let page_index_end = self.v_region_end / LINUX_PAGE_SIZE;
 
         // page start and read length in bytes (one page has a 64bit entry)
-        let page_start_bytes = page_start * 8;
-        let read_length_bytes = (page_end - page_start + 1) * 8;
+        let page_start_bytes = page_index_start * 8;
+        let read_length_bytes = (page_index_end - page_index_start + 1) * 8;
 
         // seek to the first page index of the memory region
         pagemap.seek(io::SeekFrom::Start(page_start_bytes as u64))?;
@@ -84,7 +82,7 @@ impl MemoryRegion {
         // and map pages in RAM to their physical addresses
         let ram_pages = u64_buf
             .iter()
-            .zip(page_start..page_end)
+            .zip(page_index_start..page_index_end)
             .filter(|(page_val, _)| {
                 // the last bit is set if page is in RAM
                 (*page_val & (1 << 63)) != 0
@@ -95,13 +93,13 @@ impl MemoryRegion {
             });
 
         // iterate over the values and find consecutive mappings to store in our map
-        let mut physical_address: Option<MemoryRange> = None;
+        let mut physical_address: Option<(usize, usize)> = None;
         let mut v_start = 0;
         let mut last_page_frame_number = 0;
         for (page_frame_number, v_page) in ram_pages {
             // start new address range if none exists yet
             if physical_address.is_none() {
-                physical_address = Some(MemoryRange(page_frame_number, page_frame_number));
+                physical_address = Some((page_frame_number, page_frame_number));
                 v_start = v_page;
             } else {
                 // extend existing range or start new one
@@ -111,7 +109,7 @@ impl MemoryRegion {
                     assert!(phy_adr.0 < phy_adr.1);
                 } else {
                     physical_map.insert(v_start, physical_address.unwrap());
-                    physical_address = Some(MemoryRange(page_frame_number, page_frame_number));
+                    physical_address = Some((page_frame_number, page_frame_number));
                     v_start = v_page;
                 }
             }
@@ -133,12 +131,12 @@ impl MemoryRegion {
     /// Constructs a new `MemoryRegion` given components of the `/proc/[pid]/maps` lines
     pub fn new_from_map_fields(map_fields: &Vec<&str>) -> Self {
         let address = map_fields[0].split('-').collect::<Vec<_>>();
-        let start = usize::from_str_radix(address[0], 16).unwrap();
-        let end = usize::from_str_radix(address[1], 16).unwrap();
-        let virtual_pages = MemoryRange(start, end);
+        let v_region_start = usize::from_str_radix(address[0], 16).unwrap();
+        let v_region_end = usize::from_str_radix(address[1], 16).unwrap();
 
         // verify that the region is valid
-        assert!(start < end, "Expect region start < end. (Have {} >= {})", start, end);
+        assert!(v_region_start < v_region_end,
+                "Expect region start < end. (Have {} >= {})", v_region_start, v_region_end);
 
         let offset = usize::from_str_radix(map_fields[2], 16).unwrap();
         let pathname = {
@@ -157,7 +155,7 @@ impl MemoryRegion {
         let permissions = MemoryPermissions::new_from_str(perm_str);
 
         MemoryRegion {
-            virtual_pages,
+            v_region_start, v_region_end,
             offset,
             pathname,
             permissions,
