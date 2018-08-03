@@ -2,15 +2,20 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::io;
 
+use std::fmt;
+
 use std::collections::HashMap;
 use byteorder::{NativeEndian, ReadBytesExt};
 
 /// Page size for many linux variants (at least Ubuntu..)
-/// Find out hot to look it up programatically in Rust (e.g. `getpagesize` in glibc).
+///
+/// Could be changed to get it programatically in Rust (e.g. `getpagesize` in glibc).
 pub const LINUX_PAGE_SIZE: usize = 4096;
+
 
 bitflags! {
     /// Memory region permissions, as they are mapped by `mmap`
+    ///
     /// if `SHARED` is not set, then the visibility of the mapping is `PRIVATE`
     pub struct MemoryPermissions: u8 {
         const READ = 0x01;
@@ -19,6 +24,65 @@ bitflags! {
         const SHARED = 0x08;
     }
 }
+
+
+/// A `PageLocation` type indicating whether a page is in RAM or swapped out.
+///
+/// A `NONE` case was also added in case the page isn't used or there were access errors.
+#[derive(Debug, PartialEq)]
+enum PageLocation {
+    RAM,
+    SWAP,
+    NONE,
+}
+
+
+/// Store information about physical page frames.
+///
+/// By default, only high-level information is present, such as:
+/// - Whether the page is in RAM or in swap
+/// - if the page is file-mapped or anonymous
+/// - if the page table entry is soft-dirty
+///   (this seems to be used mostly for tracing page accesses)
+/// - the page frame number (PFN), if present
+///
+/// The swap type and offset are currently not stored, if the page is swapped out.
+#[derive(Debug, PartialEq)]
+pub struct PageFrame {
+    page_location: PageLocation,
+    is_file_page: bool,
+    is_soft_dirty: bool,
+    pfn: usize,
+}
+
+
+/// A `PageFrameRegion` indicates a number of successive repeating `PageFrame` structs.
+#[derive(Debug)]
+struct PageFrameRegion {
+    frame: PageFrame,
+    len: usize,
+}
+
+
+struct PageFrameMap(HashMap<usize, PageFrameRegion>);
+
+
+/// Describes a memory region as contained in `/proc/[pid]/maps`
+#[derive(Debug)]
+pub struct MemoryRegion {
+    /// virtual memory region
+    v_region_start: usize,
+    v_region_end: usize,
+    permissions: MemoryPermissions,
+
+    /// mapped file location and offset in the file
+    offset: usize,
+    pathname: Option<String>,
+
+    /// the corresponding physical regions that make up the virtual range
+    physical_regions: Option<PageFrameMap>,
+}
+
 
 impl MemoryPermissions {
     pub fn new_from_str(perm_str: &str) -> Self {
@@ -33,21 +97,58 @@ impl MemoryPermissions {
     }
 }
 
-/// Describes a memory region as contained in `/proc/[pid]/maps`
-#[derive(Debug)]
-pub struct MemoryRegion {
-    // virtual memory region
-    v_region_start: usize,
-    v_region_end: usize,
-    permissions: MemoryPermissions,
 
-    // mapped file location and offset in the file
-    offset: usize,
-    pathname: Option<String>,
+impl PageFrame {
+    /// Construct a new `PageFrame` struct from its binary encoding.
+    pub fn new(page_index: u64) -> Self {
+        let ram_flag = page_index & (1 << 63) != 0;
+        let swap_flag = page_index & (1 << 62) != 0;
 
-    // the corresponding physical regions that make up the virtual range
-    physical_regions: Option<HashMap<usize, (usize, usize)>>,
+        // apparently pages can be neither in RAM nor in SWAP, so the NONE case
+        // was added. That probably means that page was allocated by never accessed.
+        let page_location =
+            if ram_flag {
+                PageLocation::RAM
+            } else if swap_flag {
+                PageLocation::SWAP
+            } else {
+                PageLocation::NONE
+            };
+
+        let is_file_page = page_index & (1 << 61) != 0;
+        let is_soft_dirty = page_index & (55 << 1) != 0;
+
+        let pfn = (page_index & ((1 << 55) - 1)) as usize;
+
+        PageFrame {
+            page_location,
+            is_file_page,
+            is_soft_dirty,
+            pfn: pfn,
+        }
+    }
+
+    /// Determine if this `PageFrame` comes before the `other: PageFrame`
+    /// This function is used to detect runs of identical page frames.
+    pub fn is_previous_page(&self, other: &Self) -> bool {
+        return self.page_location == other.page_location &&
+            self.is_file_page == other.is_file_page &&
+            self.is_soft_dirty == other.is_soft_dirty &&
+            (self.pfn + 1) == other.pfn;
+    }
 }
+
+
+impl fmt::Debug for PageFrameMap {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        for (key, value) in &self.0 {
+            writeln!(f, "{:?} - {:?}", key, value)?;
+        }
+
+        Ok(())
+    }
+}
+
 
 impl MemoryRegion {
     pub fn fill_physical_maps(&mut self, pagemap: &mut File) -> io::Result<()> {
@@ -55,7 +156,7 @@ impl MemoryRegion {
             println!("Finding physical maps for {}", self.pathname.as_ref().unwrap());
         }
 
-        let mut physical_map: HashMap<usize, (usize, usize)> = HashMap::new();
+        let mut physical_map: PageFrameMap = PageFrameMap(HashMap::new());
 
         // start and end page numbers
         let page_index_start = self.v_region_start / LINUX_PAGE_SIZE;
@@ -77,53 +178,40 @@ impl MemoryRegion {
         let mut u64_buf = vec![0u64; read_length_bytes / 8];
         buf_rdr.read_u64_into::<NativeEndian>(&mut u64_buf).unwrap();
 
-        // associate physical pages with their virtual addresses
-        // and filter physical pages which are not in RAM
-        // and map pages in RAM to their physical addresses
-        let ram_pages = u64_buf
-            .iter()
-            .zip(page_index_start..page_index_end)
-            .filter(|(page_val, _)| {
-                // the last bit is set if page is in RAM
-                (*page_val & (1 << 63)) != 0
-            })
-            .map(|(page_val, v_page)| {
-                // only keep the bottom 55 bits
-                ((*page_val & ((1 << 55) - 1)) as usize, v_page)
-            });
+        let mut page_frames = u64_buf.into_iter()
+            .map(PageFrame::new)
+            .zip(page_index_start..page_index_end);
 
         // iterate over the values and find consecutive mappings to store in our map
         let mut physical_address: Option<(usize, usize)> = None;
-        let mut v_start = 0;
-        let mut last_page_frame_number = 0;
-        for (page_frame_number, v_page) in ram_pages {
-            // start new address range if none exists yet
-            if physical_address.is_none() {
-                physical_address = Some((page_frame_number, page_frame_number));
+
+        // check if the iterator is empty, and if so, terminate early
+        let first_page = page_frames.next();
+        if first_page.is_none() {
+            self.physical_regions = None;
+            return Ok(());
+        }
+
+        // unwrap the first page of the iterator and iterate through the rest
+        let (mut last_frame, mut v_start) = first_page.unwrap();
+        for (page_frame, v_page) in page_frames {
+            // we combine sequences of identical frames or frames that follow another
+            if (last_frame != page_frame) && (!last_frame.is_previous_page(&page_frame)) {
+                let frame = PageFrameRegion { frame: last_frame, len: v_page - v_start };
+                physical_map.0.insert(v_start,
+                                      frame);
                 v_start = v_page;
-            } else {
-                // extend existing range or start new one
-                if page_frame_number == last_page_frame_number + 1 {
-                    let phy_adr = physical_address.as_mut().unwrap();
-                    phy_adr.1 = page_frame_number;
-                    assert!(phy_adr.0 < phy_adr.1);
-                } else {
-                    physical_map.insert(v_start, physical_address.unwrap());
-                    physical_address = Some((page_frame_number, page_frame_number));
-                    v_start = v_page;
-                }
             }
 
-            last_page_frame_number = page_frame_number;
+            last_frame = page_frame;
         }
 
-        // insert the last physical memory region, if any was found
-        if let Some(physical_mem_range) = physical_address {
-            physical_map.insert(v_start, physical_mem_range);
-        }
+        // add the last open PageFrameRegion
+        physical_map.0.insert(v_start,
+                              PageFrameRegion{ frame: last_frame, len: page_index_end - v_start});
 
         // if the physical address map is empty, insert None. Else insert the map.
-        self.physical_regions = if physical_map.is_empty() { None } else { Some(physical_map) };
+        self.physical_regions = Some(physical_map);
 
         Ok(())
     }
@@ -155,7 +243,8 @@ impl MemoryRegion {
         let permissions = MemoryPermissions::new_from_str(perm_str);
 
         MemoryRegion {
-            v_region_start, v_region_end,
+            v_region_start,
+            v_region_end,
             offset,
             pathname,
             permissions,

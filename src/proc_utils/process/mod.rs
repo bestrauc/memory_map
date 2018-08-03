@@ -6,9 +6,9 @@ use std::io::prelude::*;
 use self::memory::MemoryRegion;
 
 /// Enum to express the process states from `/proc/[pid]/stat`
-/// The comment next to the variant is the shortcut in the stat file.
 #[derive(Debug)]
 pub enum ProcessState {
+    /// The comment next to the variant is the shortcut in the stat file.
     // R
     Running,
     // S
