@@ -31,8 +31,11 @@ bitflags! {
 /// A `NONE` case was also added in case the page isn't used or there were access errors.
 #[derive(Debug, PartialEq)]
 enum PageLocation {
-    RAM,
-    SWAP,
+    /// Location in RAM, in page frames.
+    RAM(usize),
+    /// Location in SWAP, first index is swap type, second index is offset in that swap.
+    SWAP(usize, usize),
+    /// Invalid page/no page found.
     NONE,
 }
 
@@ -52,7 +55,6 @@ pub struct PageFrame {
     page_location: PageLocation,
     is_file_page: bool,
     is_soft_dirty: bool,
-    pfn: usize,
 }
 
 
@@ -108,9 +110,15 @@ impl PageFrame {
         // was added. That probably means that page was allocated by never accessed.
         let page_location =
             if ram_flag {
-                PageLocation::RAM
+                // Bits 0-54 indicate Page Frame Number (PFN)
+                let pfn = (page_index & ((1 << 55) - 1)) as usize;
+                PageLocation::RAM(pfn)
             } else if swap_flag {
-                PageLocation::SWAP
+                // Bits 0-4 indicate the Swap Type
+                let swap_type = (page_index & 0b0001_1111) as usize;
+                // Bite 5-54 indicate Swap Offset
+                let swap_offset = ((page_index >> 5) & ((1 << 50) - 1)) as usize;
+                PageLocation::SWAP(swap_type, swap_offset)
             } else {
                 PageLocation::NONE
             };
@@ -118,23 +126,30 @@ impl PageFrame {
         let is_file_page = page_index & (1 << 61) != 0;
         let is_soft_dirty = page_index & (55 << 1) != 0;
 
-        let pfn = (page_index & ((1 << 55) - 1)) as usize;
-
         PageFrame {
             page_location,
             is_file_page,
             is_soft_dirty,
-            pfn: pfn,
         }
     }
 
     /// Determine if this `PageFrame` comes before the `other: PageFrame`
     /// This function is used to detect runs of identical page frames.
     pub fn is_previous_page(&self, other: &Self) -> bool {
-        return self.page_location == other.page_location &&
-            self.is_file_page == other.is_file_page &&
-            self.is_soft_dirty == other.is_soft_dirty &&
-            (self.pfn + 1) == other.pfn;
+        // the basic attributes have to be equal anyway
+        if (self.is_file_page != other.is_file_page) ||
+            (self.is_soft_dirty != other.is_soft_dirty) {
+            return false;
+        }
+
+        // the locations must have the same type (RAM or SWAP) and the ordering must be right.
+        match (&self.page_location, &other.page_location) {
+            (PageLocation::RAM(pfn1), PageLocation::RAM(pfn2)) => ((*pfn1 + 1) == *pfn2),
+            (PageLocation::SWAP(type1, offset1), PageLocation::SWAP(type2, offset2)) => {
+                (*type1 == *type2) && ((*offset1 + 1) == *offset2)
+            },
+            _ => false,
+        }
     }
 }
 
