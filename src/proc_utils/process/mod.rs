@@ -23,6 +23,8 @@ pub enum ProcessState {
     Tracing,
     // X
     Dead,
+    // I
+    Idle,
 }
 
 impl ProcessState {
@@ -35,6 +37,7 @@ impl ProcessState {
             'T' => ProcessState::Stopped,
             't' => ProcessState::Tracing,
             'X' => ProcessState::Dead,
+            'I' => ProcessState::Idle,
             _ => panic!("Invalid state code '{}' encountered", state_code)
         }
     }
@@ -65,6 +68,7 @@ impl ProcessMemoryMap {
         let mut maps_file = File::open(&maps_path)
             .expect(&format!("Could not open file '{}'", maps_path));
 
+        // check if we want to and if we even can read the physical pagemap
         let mut pagemap_option = {
             if !map_physical {
                 None
@@ -119,12 +123,12 @@ pub struct ProcessInformation {
     state: ProcessState,
 
     // The mapped memory of the process.
-    memory: ProcessMemoryMap,
+    memory: Option<ProcessMemoryMap>,
 }
 
 impl ProcessInformation {
     /// Construct a new `ProcessInformation` from the parsed fields of `/proc/[pid]/stat`
-    pub fn new_from_stat(stat_fields: &Vec<String>) -> Self {
+    pub fn new_from_stat(stat_fields: &Vec<String>, preload_mapping: bool) -> Self {
         let pid = stat_fields[0].parse::<usize>().unwrap();
 
         ProcessInformation {
@@ -132,11 +136,28 @@ impl ProcessInformation {
             comm: stat_fields[1].clone(),
             state: ProcessState::new_from_code(stat_fields[2].chars().next().unwrap()),
 
-            memory: ProcessMemoryMap::new_memory_map(pid, true),
+            memory: match preload_mapping {
+                true => Some(ProcessMemoryMap::new_memory_map(pid, true)),
+                false => None,
+            },
         }
     }
 
+    pub fn memory(&mut self) -> &ProcessMemoryMap {
+        self.memory.get_or_insert(ProcessMemoryMap::new_memory_map(self.pid, true))
+    }
+
     pub fn has_physical_map(&self) -> bool {
-        self.memory.regions.last().is_some()
+        // if no memory mapping has been computed yet, return false
+        if self.memory.is_none() {
+            return false;
+        }
+
+        // else check if a physical mapping is available (at least for some region)
+        return self.memory.as_ref().unwrap().regions.iter().any(
+            |ref region| {
+                region.has_physical_mapping()
+            }
+        );
     }
 }

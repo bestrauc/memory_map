@@ -39,7 +39,7 @@ fn get_process_metadata(dir_path: PathBuf) -> ProcessInformation {
     assert_eq!(stat_fields.len(), 52,
                "Expected {} metadata fields, found {}", 52, stat_fields.len());
 
-    ProcessInformation::new_from_stat(&stat_fields)
+    ProcessInformation::new_from_stat(&stat_fields, true)
 }
 
 pub fn get_pid_info(pid: u64) -> io::Result<ProcessInformation> {
