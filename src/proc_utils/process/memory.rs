@@ -197,9 +197,6 @@ impl MemoryRegion {
             .map(PageFrame::new)
             .zip(page_index_start..page_index_end);
 
-        // iterate over the values and find consecutive mappings to store in our map
-        let mut physical_address: Option<(usize, usize)> = None;
-
         // check if the iterator is empty, and if so, terminate early
         let first_page = page_frames.next();
         if first_page.is_none() {
@@ -265,5 +262,9 @@ impl MemoryRegion {
             permissions,
             physical_regions: None,
         }
+    }
+
+    pub fn has_physical_mapping(&self) -> bool {
+        return self.physical_regions.is_some();
     }
 }
