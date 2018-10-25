@@ -23,6 +23,8 @@ pub enum ProcessState {
     Tracing,
     // X
     Dead,
+    // I
+    Idle,
 }
 
 impl ProcessState {
@@ -35,6 +37,7 @@ impl ProcessState {
             'T' => ProcessState::Stopped,
             't' => ProcessState::Tracing,
             'X' => ProcessState::Dead,
+            'I' => ProcessState::Idle,
             _ => panic!("Invalid state code '{}' encountered", state_code)
         }
     }
