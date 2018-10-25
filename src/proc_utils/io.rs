@@ -80,18 +80,12 @@ pub fn get_process_info() -> Vec<ProcessInformation> {
         })
         .collect::<Vec<_>>();
 
-    println!("Found {} processes", proc_dirs.len());
-
+    // get metadata info about the PIDs we collected
     for dir_entry in proc_dirs {
         let process_info = get_process_metadata(dir_entry.path());
         process_list.push(process_info);
     }
 
-    let pagemap_available = process_list.iter()
-        .filter(|process| process.has_physical_map())
-        .count();
-
-    println!("Could access pagemap info for {} processes", pagemap_available);
-
     process_list
 }
+
