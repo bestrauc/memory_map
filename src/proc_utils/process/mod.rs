@@ -118,9 +118,9 @@ impl ProcessMemoryMap {
 #[derive(Debug)]
 pub struct ProcessInformation {
     // Process metadata
-    pid: usize,
-    comm: String,
-    state: ProcessState,
+    pub pid: usize,
+    pub comm: String,
+    pub state: ProcessState,
 
     // The mapped memory of the process.
     memory: Option<ProcessMemoryMap>,

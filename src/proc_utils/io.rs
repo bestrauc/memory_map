@@ -3,12 +3,16 @@ use std::path::PathBuf;
 use std::io::prelude::*;
 use std::io;
 
+use std::thread;
+use std::time::Duration;
+use std::sync::mpsc::{sync_channel, Receiver, TrySendError, TryRecvError};
+
 use super::process::ProcessInformation;
 
 /// Parse process metadata from the `/proc/[pid]/stat` file
 ///
 /// Precondition: dir_entry must be a valid process information directory.
-fn get_process_metadata(dir_path: PathBuf) -> ProcessInformation {
+fn get_process_metadata(dir_path: PathBuf, load_mapping: bool) -> ProcessInformation {
     // parse the /proc/pid/stat file
     let stat_path = dir_path.join("stat");
     let stat_string = stat_path.to_str().unwrap().to_string();
@@ -39,7 +43,7 @@ fn get_process_metadata(dir_path: PathBuf) -> ProcessInformation {
     assert_eq!(stat_fields.len(), 52,
                "Expected {} metadata fields, found {}", 52, stat_fields.len());
 
-    ProcessInformation::new_from_stat(&stat_fields, true)
+    ProcessInformation::new_from_stat(&stat_fields, load_mapping)
 }
 
 pub fn get_pid_info(pid: u64) -> io::Result<ProcessInformation> {
@@ -52,7 +56,8 @@ pub fn get_pid_info(pid: u64) -> io::Result<ProcessInformation> {
         return Err(err);
     }
 
-    let process_info = get_process_metadata(PathBuf::from(process_path));
+    let process_info = get_process_metadata(PathBuf::from(process_path),
+                                            true);
     Ok(process_info)
 }
 
@@ -82,10 +87,61 @@ pub fn get_process_info() -> Vec<ProcessInformation> {
 
     // get metadata info about the PIDs we collected
     for dir_entry in proc_dirs {
-        let process_info = get_process_metadata(dir_entry.path());
+        let process_info = get_process_metadata(dir_entry.path(),
+                                                false);
         process_list.push(process_info);
     }
 
     process_list
 }
 
+
+pub struct ProcScanner {
+    proc_receiver: Receiver<Vec<ProcessInformation>>,
+}
+
+
+impl ProcScanner {
+    pub fn new() -> Self {
+        let (sync_sender, receiver) = sync_channel(1);
+
+        // spawn the thread
+        thread::spawn(move || {
+            loop {
+                let process_list = get_process_info();
+
+                // if we have an error while sending, check the error type
+                if let Err(send_error) = sync_sender.try_send(process_list) {
+
+                    // if the queue is full, do nothing.
+                    // at receiver disconnect, shut down thread.
+                    match send_error {
+                        TrySendError::Full(_) => {
+                            println!("Queue is full!")
+                        },
+                        TrySendError::Disconnected(_) => {
+                            println!("Terminating the process scanning thread.");
+                            break;
+                        }
+                    };
+                } else {
+                    println!("Successfully enqueued new process info.");
+                }
+
+                // only scan the processes every 2 seconds
+                // TODO: think about whether sleeping here is best (or after starting the scan?)
+                thread::sleep(Duration::from_secs(2));
+            }
+        });
+
+        ProcScanner {
+            proc_receiver: receiver,
+        }
+    }
+
+    pub fn process_info(&self) -> Option<Vec<ProcessInformation>> {
+        // return the receiver process information, if any was returned
+        // TODO: sender disconnect could happen when the process scan thread crashes, handle that
+        self.proc_receiver.try_recv().ok()
+    }
+}
